@@ -5,3 +5,5 @@ resources:
   - namespace.yaml
   - mock-nvidia.yaml
   - mock-tenstorrent.yaml
+  - scorer-api.yaml
+  - router.yaml
