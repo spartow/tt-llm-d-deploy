@@ -20,7 +20,8 @@ spec:
           image: hetroserve/router:dev
           imagePullPolicy: Never
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
           env:
             - name: SCORER_URL
               value: "http://hetroserve-scorer:8080"
@@ -34,6 +35,10 @@ metadata:
   namespace: hetroserve-demo
   labels:
     app: hetroserve-router
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: "/metrics"
+    prometheus.io/port: "8080"
 spec:
   selector:
     app: hetroserve-router
