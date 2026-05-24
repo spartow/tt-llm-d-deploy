@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python:
+    name: Python lint and smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r router/requirements.txt
+          pip install -r mock-backend/requirements.txt
+          pip install -r benchmark/requirements.txt
+          pip install ruff
+
+      - name: Lint
+        run: ruff check . || true   # warn-only initially; tighten over time
+
+      - name: Smoke import — mock backend
+        run: |
+          cd mock-backend
+          python -c "import main; print('mock-backend imports cleanly')"
+
+      - name: Smoke import — router
+        run: |
+          cd router
+          python -c "import app; print('router imports cleanly')"
+
+  manifests:
+    name: Kubernetes manifest validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Lint YAML
+        run: |
+          yamllint -d "{rules: {line-length: disable, document-start: disable, truthy: disable}}" k8s/ || true
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Dry-run manifests
+        run: |
+          set -e
+          for f in $(find k8s/ -name '*.yaml' -size +0); do
+            echo "Validating $f"
+            kubectl apply --dry-run=client --validate=false -f "$f"
+          done
