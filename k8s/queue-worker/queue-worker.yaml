@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hetroserve-worker-nvidia
+  namespace: hetroserve-demo
+  labels:
+    app: hetroserve-queue-worker
+    backend: nvidia
+    vendor: nvidia
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hetroserve-queue-worker
+      backend: nvidia
+  template:
+    metadata:
+      labels:
+        app: hetroserve-queue-worker
+        backend: nvidia
+        vendor: nvidia
+    spec:
+      containers:
+        - name: queue-worker
+          image: hetroserve/queue-worker:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: REDIS_HOST
+              value: hetroserve-redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: QUEUE_NAME
+              value: queue:nvidia
+            - name: BACKEND_NAME
+              value: nvidia
+            - name: BACKEND_VENDOR
+              value: nvidia
+            - name: BACKEND_URL
+              value: http://mock-nvidia:8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hetroserve-worker-nvidia
+  namespace: hetroserve-demo
+  labels:
+    app: hetroserve-queue-worker
+    backend: nvidia
+spec:
+  type: ClusterIP
+  selector:
+    app: hetroserve-queue-worker
+    backend: nvidia
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hetroserve-worker-tenstorrent
+  namespace: hetroserve-demo
+  labels:
+    app: hetroserve-queue-worker
+    backend: tenstorrent
+    vendor: tenstorrent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hetroserve-queue-worker
+      backend: tenstorrent
+  template:
+    metadata:
+      labels:
+        app: hetroserve-queue-worker
+        backend: tenstorrent
+        vendor: tenstorrent
+    spec:
+      containers:
+        - name: queue-worker
+          image: hetroserve/queue-worker:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: REDIS_HOST
+              value: hetroserve-redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: QUEUE_NAME
+              value: queue:tenstorrent
+            - name: BACKEND_NAME
+              value: tenstorrent
+            - name: BACKEND_VENDOR
+              value: tenstorrent
+            - name: BACKEND_URL
+              value: http://mock-tenstorrent:8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hetroserve-worker-tenstorrent
+  namespace: hetroserve-demo
+  labels:
+    app: hetroserve-queue-worker
+    backend: tenstorrent
+spec:
+  type: ClusterIP
+  selector:
+    app: hetroserve-queue-worker
+    backend: tenstorrent
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
