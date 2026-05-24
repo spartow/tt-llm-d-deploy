@@ -1,255 +1,309 @@
 import json
+import logging
 import os
 import time
 import uuid
-from typing import Any
+from typing import Any, Dict
 
-import redis
 import requests
-from fastapi import FastAPI, HTTPException, Request, Response
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from fastapi import FastAPI
+from pydantic import BaseModel
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from starlette.responses import Response
+
+
+app = FastAPI(title="HetroServe Router", version="0.1.0")
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
+logger = logging.getLogger("hetroserve-router")
+
+LAST_EPP_REQUEST: Dict[str, Any] = {}
 
 SCORER_URL = os.getenv("SCORER_URL", "http://hetroserve-scorer:8080")
 SCORER_MODE = os.getenv("SCORER_MODE", "legacy").lower()
-REDIS_HOST = os.getenv("REDIS_HOST", "hetroserve-redis")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-RESULT_TIMEOUT_SECONDS = float(os.getenv("RESULT_TIMEOUT_SECONDS", "30"))
-RESULT_POLL_INTERVAL_SECONDS = float(os.getenv("RESULT_POLL_INTERVAL_SECONDS", "0.05"))
 
-app = FastAPI(title="HetroServe Router")
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+ROUTING_MODE = os.getenv("ROUTING_MODE", "direct").lower()
 
-redis_client = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    decode_responses=True,
-)
+NVIDIA_URL = os.getenv("NVIDIA_URL", "http://mock-nvidia:8000")
+TENSTORRENT_URL = os.getenv("TENSTORRENT_URL", "http://mock-tenstorrent:8000")
 
-router_requests = Counter(
+CONTROL_TIMEOUT_SECONDS = float(os.getenv("CONTROL_TIMEOUT_SECONDS", "2"))
+
+REQUEST_COUNT = Counter(
     "hetroserve_router_requests_total",
     "Total router requests",
-    ["endpoint"],
+    ["endpoint", "selected_backend", "selected_vendor"],
 )
 
-router_selected_backend = Counter(
-    "hetroserve_router_selected_backend_total",
-    "Total selected backend count",
-    ["backend", "vendor"],
-)
-
-router_errors = Counter(
-    "hetroserve_router_errors_total",
-    "Total router errors",
-    ["endpoint", "error_type"],
-)
-
-router_scorer_latency = Histogram(
-    "hetroserve_router_scorer_latency_seconds",
-    "Router scorer /pick latency",
-)
-
-router_queue_wait_latency = Histogram(
-    "hetroserve_router_queue_wait_latency_seconds",
-    "Time router waits for Redis worker result",
-    ["backend", "vendor"],
-)
-
-router_enqueue_latency = Histogram(
-    "hetroserve_router_enqueue_latency_seconds",
-    "Time router spends pushing job to Redis",
-    ["backend", "vendor", "queue"],
+REQUEST_LATENCY = Histogram(
+    "hetroserve_router_request_latency_seconds",
+    "Router request latency",
+    ["endpoint", "selected_backend", "selected_vendor"],
 )
 
 
-def extract_prompt_from_chat(body: dict[str, Any]) -> str:
-    messages = body.get("messages", [])
-    if not messages:
-        return ""
-
-    parts = []
-    for message in messages:
-        role = message.get("role", "user")
-        content = message.get("content", "")
-        parts.append(f"{role}: {content}")
-
-    return "\n".join(parts)
+class GenerateRequest(BaseModel):
+    prompt: str
+    max_tokens: int = 64
 
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
 
-def build_epp_request() -> dict:
+
+class ChatCompletionsRequest(BaseModel):
+    model: str = "hetroserve-auto"
+    messages: list[ChatMessage]
+    max_tokens: int = 64
+
+
+def backend_env_defaults() -> Dict[str, Dict[str, Any]]:
     return {
-        "request_id": "router-epp-pick",
-        "model": "demo-llm",
-        "tenant": "demo",
-        "strategy": "cost_latency_score",
+        "nvidia": {
+            "name": "nvidia",
+            "url": NVIDIA_URL,
+            "vendor": "nvidia",
+            "model": os.getenv("NVIDIA_MODEL", "demo-llm"),
+            "latency_ms": float(os.getenv("NVIDIA_LATENCY_MS", "120")),
+            "queue_depth": int(os.getenv("NVIDIA_QUEUE_DEPTH", "2")),
+            "cost_per_1k_tokens": float(os.getenv("NVIDIA_COST_PER_1K_TOKENS", "0.02")),
+            "healthy": os.getenv("NVIDIA_HEALTHY", "true").lower() == "true",
+            "metrics_source": "env_fallback",
+        },
+        "tenstorrent": {
+            "name": "tenstorrent",
+            "url": TENSTORRENT_URL,
+            "vendor": "tenstorrent",
+            "model": os.getenv("TENSTORRENT_MODEL", "demo-llm"),
+            "latency_ms": float(os.getenv("TENSTORRENT_LATENCY_MS", "180")),
+            "queue_depth": int(os.getenv("TENSTORRENT_QUEUE_DEPTH", "1")),
+            "cost_per_1k_tokens": float(os.getenv("TENSTORRENT_COST_PER_1K_TOKENS", "0.006")),
+            "healthy": os.getenv("TENSTORRENT_HEALTHY", "true").lower() == "true",
+            "metrics_source": "env_fallback",
+        },
+    }
+
+
+def fetch_backend_control(name: str, defaults: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Fetch live backend metrics from /control.
+
+    Expected backend response:
+    {
+      "backend": "tenstorrent",
+      "vendor": "tenstorrent",
+      "control": {
+        "latency_ms": 180.0,
+        "queue_depth": 1,
+        "cost_per_1k_tokens": 0.006,
+        "healthy": true
+      }
+    }
+
+    If /control fails or is malformed, return env fallback defaults.
+    """
+    try:
+        response = requests.get(
+            f"{defaults['url']}/control",
+            timeout=CONTROL_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+        control = payload.get("control", {})
+        if not isinstance(control, dict):
+            raise ValueError("control payload is not an object")
+
+        return {
+            "name": payload.get("backend", defaults["name"]),
+            "url": defaults["url"],
+            "vendor": payload.get("vendor", defaults["vendor"]),
+            "model": defaults["model"],
+            "latency_ms": float(control.get("latency_ms", defaults["latency_ms"])),
+            "queue_depth": int(control.get("queue_depth", defaults["queue_depth"])),
+            "cost_per_1k_tokens": float(
+                control.get("cost_per_1k_tokens", defaults["cost_per_1k_tokens"])
+            ),
+            "healthy": bool(control.get("healthy", defaults["healthy"])),
+            "metrics_source": "live_control",
+        }
+
+    except Exception as exc:
+        fallback = dict(defaults)
+        fallback["control_error"] = str(exc)
+        fallback["metrics_source"] = "env_fallback"
+        return fallback
+
+
+def build_epp_request() -> Dict[str, Any]:
+    defaults = backend_env_defaults()
+
+    nvidia = fetch_backend_control("nvidia", defaults["nvidia"])
+    tenstorrent = fetch_backend_control("tenstorrent", defaults["tenstorrent"])
+
+    return {
+        "request_id": str(uuid.uuid4()),
+        "timestamp_ms": int(time.time() * 1000),
+        "policy": "cost_latency_score",
         "latency_slo_ms": float(os.getenv("LATENCY_SLO_MS", "800")),
         "endpoints": [
-            {
-                "name": "nvidia",
-                "url": os.getenv("NVIDIA_URL", "http://mock-nvidia:8000"),
-                "vendor": "nvidia",
-                "model": "demo-llm",
-                "metrics": {
-                    "latency_ms": float(os.getenv("NVIDIA_LATENCY_MS", "120")),
-                    "queue_depth": int(os.getenv("NVIDIA_QUEUE_DEPTH", "2")),
-                    "cost_per_1k_tokens": float(os.getenv("NVIDIA_COST_PER_1K_TOKENS", "0.02")),
-                    "healthy": os.getenv("NVIDIA_HEALTHY", "true").lower() == "true",
-                },
-            },
-            {
-                "name": "tenstorrent",
-                "url": os.getenv("TENSTORRENT_URL", "http://mock-tenstorrent:8000"),
-                "vendor": "tenstorrent",
-                "model": "demo-llm",
-                "metrics": {
-                    "latency_ms": float(os.getenv("TENSTORRENT_LATENCY_MS", "180")),
-                    "queue_depth": int(os.getenv("TENSTORRENT_QUEUE_DEPTH", "1")),
-                    "cost_per_1k_tokens": float(os.getenv("TENSTORRENT_COST_PER_1K_TOKENS", "0.006")),
-                    "healthy": os.getenv("TENSTORRENT_HEALTHY", "true").lower() == "true",
-                },
-            },
+            nvidia,
+            tenstorrent,
         ],
     }
 
 
-def call_scorer() -> dict[str, Any]:
-    started = time.time()
-    try:
-        if SCORER_MODE == "epp":
-            response = requests.post(
-                f"{SCORER_URL}/epp/pick",
-                json=build_epp_request(),
-                timeout=10,
-            )
-        else:
-            response = requests.get(f"{SCORER_URL}/pick", timeout=10)
+def call_scorer() -> Dict[str, Any]:
+    global LAST_EPP_REQUEST
+
+    if SCORER_MODE == "epp":
+        epp_request = build_epp_request()
+        LAST_EPP_REQUEST = epp_request
+
+        logger.info(
+            "EPP request payload: %s",
+            json.dumps(epp_request, sort_keys=True),
+        )
+
+        scorer_payload = {
+            "request_id": epp_request.get("request_id", "router-epp-pick"),
+            "model": "demo-llm",
+            "tenant": "demo",
+            "strategy": epp_request.get("policy", "cost_latency_score"),
+            "latency_slo_ms": epp_request.get("latency_slo_ms", 800.0),
+            "endpoints": [
+                {
+                    "name": endpoint["name"],
+                    "url": endpoint["url"],
+                    "vendor": endpoint["vendor"],
+                    "model": endpoint.get("model", "demo-llm"),
+                    "metrics": {
+                        "latency_ms": endpoint.get("latency_ms", 9999.0),
+                        "queue_depth": endpoint.get("queue_depth", 9999),
+                        "cost_per_1k_tokens": endpoint.get("cost_per_1k_tokens", 1.0),
+                        "healthy": endpoint.get("healthy", False),
+                    },
+                }
+                for endpoint in epp_request.get("endpoints", [])
+            ],
+        }
+
+        response = requests.post(
+            f"{SCORER_URL}/epp/pick",
+            json=scorer_payload,
+            timeout=10,
+        )
         response.raise_for_status()
-        return response.json()
-    finally:
-        router_scorer_latency.observe(time.time() - started)
+        scorer_response = response.json()
+        scorer_response["endpoint"] = "/epp/pick"
+        return scorer_response
+
+    response = requests.get(f"{SCORER_URL}/pick", timeout=10)
+    response.raise_for_status()
+    scorer_response = response.json()
+    scorer_response["endpoint"] = "/pick"
+    return scorer_response
 
 
-def parse_winner(scorer_response: dict[str, Any]) -> dict[str, str]:
-    winner = scorer_response.get("winner", scorer_response)
-
-    backend = (
-        winner.get("name")
-        or winner.get("backend")
-        or winner.get("id")
-        or winner.get("vendor")
+def selected_from_scorer(scorer_response: Dict[str, Any]) -> Dict[str, Any]:
+    selected = (
+        scorer_response.get("selected")
+        or scorer_response.get("winner")
+        or {}
     )
 
-    vendor = winner.get("vendor") or backend
-
-    if not backend:
-        raise ValueError(f"scorer response missing winner backend: {scorer_response}")
-
-    backend = str(backend).lower()
-    vendor = str(vendor).lower()
-
-    if "tenstorrent" in backend or "tenstorrent" in vendor:
-        return {
-            "backend": "tenstorrent",
-            "vendor": "tenstorrent",
-            "queue": "queue:tenstorrent",
-        }
-
-    if "nvidia" in backend or "nvidia" in vendor:
-        return {
-            "backend": "nvidia",
-            "vendor": "nvidia",
-            "queue": "queue:nvidia",
-        }
-
-    # Safe default for unknown scorer names.
     return {
-        "backend": backend,
-        "vendor": vendor,
-        "queue": f"queue:{backend}",
+        "name": selected.get("name", "unknown"),
+        "vendor": selected.get("vendor", "unknown"),
+        "url": selected.get("url"),
     }
 
 
-def wait_for_result(job_id: str, backend: str, vendor: str) -> dict[str, Any]:
-    result_key = f"result:{job_id}"
-    deadline = time.time() + RESULT_TIMEOUT_SECONDS
-    started = time.time()
+def call_backend_generate(backend: Dict[str, Any], prompt: str, max_tokens: int) -> Dict[str, Any]:
+    backend_url = backend.get("url")
+    if not backend_url:
+        raise RuntimeError("Selected backend did not include url")
 
+    response = requests.post(
+        f"{backend_url}/generate",
+        json={"prompt": prompt, "max_tokens": max_tokens},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def queue_name_for_backend(backend_name: str) -> str:
+    return f"queue:{backend_name}"
+
+
+def call_backend_via_redis_queue(
+    backend: Dict[str, Any],
+    prompt: str,
+    max_tokens: int,
+) -> Dict[str, Any]:
+    import redis
+
+    backend_name = backend.get("name", "unknown")
+    job_id = f"job-{int(time.time() * 1000)}"
+    request_id = job_id
+    queue_name = queue_name_for_backend(backend_name)
+    response_key = f"result:{job_id}"
+
+    client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+
+    job = {
+        "job_id": job_id,
+        "request_id": request_id,
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "backend": backend_name,
+        "backend_url": backend.get("url", ""),
+    }
+
+    client.rpush(queue_name, __import__("json").dumps(job))
+
+    deadline = time.time() + 30
     while time.time() < deadline:
-        raw = redis_client.get(result_key)
+        raw = client.get(response_key)
         if raw:
-            router_queue_wait_latency.labels(backend, vendor).observe(time.time() - started)
-            redis_client.delete(result_key)
-            return json.loads(raw)
+            client.delete(response_key)
+            return __import__("json").loads(raw)
+        time.sleep(0.1)
 
-        time.sleep(RESULT_POLL_INTERVAL_SECONDS)
-
-    router_queue_wait_latency.labels(backend, vendor).observe(time.time() - started)
-    raise TimeoutError(f"timed out waiting for Redis result {result_key}")
-
-
-def enqueue_job(queue_name: str, job: dict[str, Any], backend: str, vendor: str) -> None:
-    started = time.time()
-    redis_client.lpush(queue_name, json.dumps(job))
-    router_enqueue_latency.labels(backend, vendor, queue_name).observe(time.time() - started)
-
-
-def route_via_redis(endpoint: str, request_payload: dict[str, Any]) -> dict[str, Any]:
-    router_requests.labels(endpoint).inc()
-
-    try:
-        scorer_response = call_scorer()
-        selected = parse_winner(scorer_response)
-
-        backend = selected["backend"]
-        vendor = selected["vendor"]
-        queue_name = selected["queue"]
-
-        router_selected_backend.labels(backend, vendor).inc()
-
-        job_id = str(uuid.uuid4())
-        job = {
-            "job_id": job_id,
-            "request": request_payload,
-            "selected_backend": backend,
-            "selected_vendor": vendor,
-            "created_at": time.time(),
-        }
-
-        enqueue_job(queue_name, job, backend, vendor)
-        worker_result = wait_for_result(job_id, backend, vendor)
-
-        return {
-            "router": "hetroserve-router",
-            "routing_mode": "redis_queue",
-            "job_id": job_id,
-            "selected_backend": backend,
-            "selected_vendor": vendor,
-            "queue": queue_name,
-            "scorer": scorer_response,
-            "worker_result": worker_result,
-        }
-
-    except TimeoutError as exc:
-        router_errors.labels(endpoint, "result_timeout").inc()
-        raise HTTPException(status_code=504, detail=str(exc)) from exc
-
-    except requests.RequestException as exc:
-        router_errors.labels(endpoint, "scorer_error").inc()
-        raise HTTPException(status_code=502, detail=f"scorer error: {exc}") from exc
-
-    except Exception as exc:
-        router_errors.labels(endpoint, "unknown").inc()
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    raise TimeoutError(f"Timed out waiting for worker response on {response_key}")
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "hetroserve-router",
-        "routing_mode": "redis_queue",
-        "redis": f"{REDIS_HOST}:{REDIS_PORT}",
-        "scorer_url": SCORER_URL,
+        "routing_mode": ROUTING_MODE,
         "scorer_mode": SCORER_MODE,
+        "scorer_url": SCORER_URL,
+    }
+
+
+@app.get("/debug/epp-request")
+def debug_epp_request() -> Dict[str, Any]:
+    """
+    Returns the latest EPP request payload generated by the router.
+
+    This is for local/kind proof only. In production, this should be protected,
+    disabled, or removed.
+    """
+    if not LAST_EPP_REQUEST:
+        return {
+            "status": "empty",
+            "message": "No EPP request has been generated yet.",
+        }
+
+    return {
+        "status": "ok",
+        "latest_epp_request": LAST_EPP_REQUEST,
     }
 
 
@@ -259,52 +313,75 @@ def metrics() -> Response:
 
 
 @app.post("/v1/generate")
-async def generate(request: Request) -> dict[str, Any]:
-    body = await request.json()
+def generate(request: GenerateRequest) -> Dict[str, Any]:
+    start = time.time()
+    scorer_response = call_scorer()
+    selected_backend = selected_from_scorer(scorer_response)
 
-    request_payload = {
-        "prompt": body.get("prompt", ""),
-        "max_tokens": body.get("max_tokens", 64),
+    if ROUTING_MODE == "redis_queue":
+        backend_response = call_backend_via_redis_queue(
+            selected_backend,
+            request.prompt,
+            request.max_tokens,
+        )
+        queue = queue_name_for_backend(selected_backend["name"])
+    else:
+        backend_response = call_backend_generate(
+            selected_backend,
+            request.prompt,
+            request.max_tokens,
+        )
+        queue = None
+
+    elapsed = time.time() - start
+
+    REQUEST_COUNT.labels(
+        endpoint="/v1/generate",
+        selected_backend=selected_backend["name"],
+        selected_vendor=selected_backend["vendor"],
+    ).inc()
+
+    REQUEST_LATENCY.labels(
+        endpoint="/v1/generate",
+        selected_backend=selected_backend["name"],
+        selected_vendor=selected_backend["vendor"],
+    ).observe(elapsed)
+
+    return {
+        "id": str(uuid.uuid4()),
+        "object": "text_completion",
+        "selected_backend": selected_backend["name"],
+        "selected_vendor": selected_backend["vendor"],
+        "queue": queue,
+        "scorer": scorer_response,
+        "backend_response": backend_response,
     }
-
-    return route_via_redis("/v1/generate", request_payload)
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: Request) -> dict[str, Any]:
-    body = await request.json()
+def chat_completions(request: ChatCompletionsRequest) -> Dict[str, Any]:
+    prompt = "\n".join([f"{m.role}: {m.content}" for m in request.messages])
 
-    prompt = extract_prompt_from_chat(body)
-
-    request_payload = {
-        "prompt": prompt,
-        "max_tokens": body.get("max_tokens", 64),
-    }
-
-    routed = route_via_redis("/v1/chat/completions", request_payload)
-
-    worker_response = routed.get("worker_result", {}).get("response", {})
-    text = worker_response.get("text", "")
+    generate_response = generate(
+        GenerateRequest(prompt=prompt, max_tokens=request.max_tokens)
+    )
 
     return {
-        "id": routed["job_id"],
+        "id": generate_response["id"],
         "object": "chat.completion",
-        "model": worker_response.get("model", body.get("model", "hetroserve-routed-model")),
-        "routing": {
-            "mode": routed["routing_mode"],
-            "selected_backend": routed["selected_backend"],
-            "selected_vendor": routed["selected_vendor"],
-            "queue": routed["queue"],
-        },
+        "model": request.model,
+        "selected_backend": generate_response["selected_backend"],
+        "selected_vendor": generate_response["selected_vendor"],
+        "queue": generate_response["queue"],
+        "scorer": generate_response["scorer"],
         "choices": [
             {
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": text,
+                    "content": str(generate_response["backend_response"]),
                 },
                 "finish_reason": "stop",
             }
         ],
-        "hetroserve": routed,
     }
