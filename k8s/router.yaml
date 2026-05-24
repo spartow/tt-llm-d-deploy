@@ -25,8 +25,14 @@ spec:
           env:
             - name: SCORER_URL
               value: "http://hetroserve-scorer:8080"
-            - name: REQUEST_TIMEOUT_SECONDS
-              value: "5"
+            - name: REDIS_HOST
+              value: "hetroserve-redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: RESULT_TIMEOUT_SECONDS
+              value: "30"
+            - name: RESULT_POLL_INTERVAL_SECONDS
+              value: "0.05"
 ---
 apiVersion: v1
 kind: Service
@@ -40,6 +46,7 @@ metadata:
     prometheus.io/path: "/metrics"
     prometheus.io/port: "8080"
 spec:
+  type: ClusterIP
   selector:
     app: hetroserve-router
   ports:

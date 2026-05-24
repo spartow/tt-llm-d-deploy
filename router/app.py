@@ -1,300 +1,264 @@
+import json
 import os
 import time
 import uuid
-from typing import Any, Dict, List
+from typing import Any
 
+import redis
 import requests
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+
+SCORER_URL = os.getenv("SCORER_URL", "http://hetroserve-scorer:8080")
+REDIS_HOST = os.getenv("REDIS_HOST", "hetroserve-redis")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+RESULT_TIMEOUT_SECONDS = float(os.getenv("RESULT_TIMEOUT_SECONDS", "30"))
+RESULT_POLL_INTERVAL_SECONDS = float(os.getenv("RESULT_POLL_INTERVAL_SECONDS", "0.05"))
 
 app = FastAPI(title="HetroServe Router")
 
-SCORER_URL = os.getenv(
-    "SCORER_URL",
-    "http://hetroserve-scorer:8080",
+redis_client = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    decode_responses=True,
 )
 
-REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "5"))
-
-
-REQUESTS_TOTAL = Counter(
+router_requests = Counter(
     "hetroserve_router_requests_total",
-    "Total requests handled by HetroServe router",
+    "Total router requests",
     ["endpoint"],
 )
 
-SELECTED_BACKEND_TOTAL = Counter(
+router_selected_backend = Counter(
     "hetroserve_router_selected_backend_total",
-    "Total routing selections by backend",
+    "Total selected backend count",
     ["backend", "vendor"],
 )
 
-ERRORS_TOTAL = Counter(
+router_errors = Counter(
     "hetroserve_router_errors_total",
     "Total router errors",
     ["endpoint", "error_type"],
 )
 
-SCORER_LATENCY_SECONDS = Histogram(
+router_scorer_latency = Histogram(
     "hetroserve_router_scorer_latency_seconds",
-    "Latency for scorer /pick calls",
+    "Router scorer /pick latency",
 )
 
-BACKEND_LATENCY_SECONDS = Histogram(
-    "hetroserve_router_backend_latency_seconds",
-    "Latency for selected backend /generate calls",
+router_queue_wait_latency = Histogram(
+    "hetroserve_router_queue_wait_latency_seconds",
+    "Time router waits for Redis worker result",
     ["backend", "vendor"],
 )
+
+router_enqueue_latency = Histogram(
+    "hetroserve_router_enqueue_latency_seconds",
+    "Time router spends pushing job to Redis",
+    ["backend", "vendor", "queue"],
+)
+
+
+def extract_prompt_from_chat(body: dict[str, Any]) -> str:
+    messages = body.get("messages", [])
+    if not messages:
+        return ""
+
+    parts = []
+    for message in messages:
+        role = message.get("role", "user")
+        content = message.get("content", "")
+        parts.append(f"{role}: {content}")
+
+    return "\n".join(parts)
+
+
+def call_scorer() -> dict[str, Any]:
+    started = time.time()
+    try:
+        response = requests.get(f"{SCORER_URL}/pick", timeout=10)
+        response.raise_for_status()
+        return response.json()
+    finally:
+        router_scorer_latency.observe(time.time() - started)
+
+
+def parse_winner(scorer_response: dict[str, Any]) -> dict[str, str]:
+    winner = scorer_response.get("winner", scorer_response)
+
+    backend = (
+        winner.get("name")
+        or winner.get("backend")
+        or winner.get("id")
+        or winner.get("vendor")
+    )
+
+    vendor = winner.get("vendor") or backend
+
+    if not backend:
+        raise ValueError(f"scorer response missing winner backend: {scorer_response}")
+
+    backend = str(backend).lower()
+    vendor = str(vendor).lower()
+
+    if "tenstorrent" in backend or "tenstorrent" in vendor:
+        return {
+            "backend": "tenstorrent",
+            "vendor": "tenstorrent",
+            "queue": "queue:tenstorrent",
+        }
+
+    if "nvidia" in backend or "nvidia" in vendor:
+        return {
+            "backend": "nvidia",
+            "vendor": "nvidia",
+            "queue": "queue:nvidia",
+        }
+
+    # Safe default for unknown scorer names.
+    return {
+        "backend": backend,
+        "vendor": vendor,
+        "queue": f"queue:{backend}",
+    }
+
+
+def wait_for_result(job_id: str, backend: str, vendor: str) -> dict[str, Any]:
+    result_key = f"result:{job_id}"
+    deadline = time.time() + RESULT_TIMEOUT_SECONDS
+    started = time.time()
+
+    while time.time() < deadline:
+        raw = redis_client.get(result_key)
+        if raw:
+            router_queue_wait_latency.labels(backend, vendor).observe(time.time() - started)
+            redis_client.delete(result_key)
+            return json.loads(raw)
+
+        time.sleep(RESULT_POLL_INTERVAL_SECONDS)
+
+    router_queue_wait_latency.labels(backend, vendor).observe(time.time() - started)
+    raise TimeoutError(f"timed out waiting for Redis result {result_key}")
+
+
+def enqueue_job(queue_name: str, job: dict[str, Any], backend: str, vendor: str) -> None:
+    started = time.time()
+    redis_client.lpush(queue_name, json.dumps(job))
+    router_enqueue_latency.labels(backend, vendor, queue_name).observe(time.time() - started)
+
+
+def route_via_redis(endpoint: str, request_payload: dict[str, Any]) -> dict[str, Any]:
+    router_requests.labels(endpoint).inc()
+
+    try:
+        scorer_response = call_scorer()
+        selected = parse_winner(scorer_response)
+
+        backend = selected["backend"]
+        vendor = selected["vendor"]
+        queue_name = selected["queue"]
+
+        router_selected_backend.labels(backend, vendor).inc()
+
+        job_id = str(uuid.uuid4())
+        job = {
+            "job_id": job_id,
+            "request": request_payload,
+            "selected_backend": backend,
+            "selected_vendor": vendor,
+            "created_at": time.time(),
+        }
+
+        enqueue_job(queue_name, job, backend, vendor)
+        worker_result = wait_for_result(job_id, backend, vendor)
+
+        return {
+            "router": "hetroserve-router",
+            "routing_mode": "redis_queue",
+            "job_id": job_id,
+            "selected_backend": backend,
+            "selected_vendor": vendor,
+            "queue": queue_name,
+            "scorer": scorer_response,
+            "worker_result": worker_result,
+        }
+
+    except TimeoutError as exc:
+        router_errors.labels(endpoint, "result_timeout").inc()
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+
+    except requests.RequestException as exc:
+        router_errors.labels(endpoint, "scorer_error").inc()
+        raise HTTPException(status_code=502, detail=f"scorer error: {exc}") from exc
+
+    except Exception as exc:
+        router_errors.labels(endpoint, "unknown").inc()
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {
+        "status": "ok",
+        "service": "hetroserve-router",
+        "routing_mode": "redis_queue",
+        "redis": f"{REDIS_HOST}:{REDIS_PORT}",
+        "scorer_url": SCORER_URL,
+    }
 
 
 @app.get("/metrics")
 def metrics() -> Response:
-    return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST,
-    )
-
-
-def call_scorer_pick(endpoint: str) -> Dict[str, Any]:
-    start = time.time()
-
-    try:
-        pick_response = requests.get(
-            f"{SCORER_URL}/pick",
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-        pick_response.raise_for_status()
-        pick_data = pick_response.json()
-    except Exception as exc:
-        ERRORS_TOTAL.labels(endpoint=endpoint, error_type="scorer_pick_failed").inc()
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to call scorer /pick: {exc}",
-        )
-
-    finally:
-        SCORER_LATENCY_SECONDS.observe(time.time() - start)
-
-    winner = pick_data.get("winner")
-    if not winner:
-        ERRORS_TOTAL.labels(endpoint=endpoint, error_type="missing_winner").inc()
-        raise HTTPException(
-            status_code=502,
-            detail=f"Scorer response missing winner: {pick_data}",
-        )
-
-    backend_url = winner.get("url")
-    if not backend_url:
-        ERRORS_TOTAL.labels(endpoint=endpoint, error_type="missing_backend_url").inc()
-        raise HTTPException(
-            status_code=502,
-            detail=f"Scorer winner missing url: {winner}",
-        )
-
-    backend_name = str(winner.get("name", "unknown"))
-    backend_vendor = str(winner.get("vendor", "unknown"))
-
-    SELECTED_BACKEND_TOTAL.labels(
-        backend=backend_name,
-        vendor=backend_vendor,
-    ).inc()
-
-    return pick_data
-
-
-def call_backend_generate(
-    endpoint: str,
-    backend_url: str,
-    winner: Dict[str, Any],
-    payload: Dict[str, Any],
-) -> Dict[str, Any]:
-    backend_name = str(winner.get("name", "unknown"))
-    backend_vendor = str(winner.get("vendor", "unknown"))
-
-    generate_url = backend_url.rstrip("/") + "/generate"
-
-    start = time.time()
-
-    try:
-        backend_response = requests.post(
-            generate_url,
-            json=payload,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-        backend_response.raise_for_status()
-        return backend_response.json()
-    except Exception as exc:
-        ERRORS_TOTAL.labels(endpoint=endpoint, error_type="backend_generate_failed").inc()
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to forward request to backend {generate_url}: {exc}",
-        )
-
-    finally:
-        BACKEND_LATENCY_SECONDS.labels(
-            backend=backend_name,
-            vendor=backend_vendor,
-        ).observe(time.time() - start)
-
-
-def messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
-    lines = []
-
-    for message in messages:
-        role = message.get("role", "user")
-        content = message.get("content", "")
-
-        if isinstance(content, list):
-            text_parts = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text_parts.append(part.get("text", ""))
-            content = " ".join(text_parts)
-
-        lines.append(f"{role}: {content}")
-
-    lines.append("assistant:")
-    return "\n".join(lines)
-
-
-def extract_text_from_backend_response(data: Dict[str, Any]) -> str:
-    if "text" in data:
-        return str(data["text"])
-
-    if "response" in data:
-        return str(data["response"])
-
-    if "generated_text" in data:
-        return str(data["generated_text"])
-
-    if "output" in data:
-        return str(data["output"])
-
-    if "message" in data:
-        return str(data["message"])
-
-    return str(data)
-
-
-@app.get("/health")
-def health() -> Dict[str, str]:
-    return {
-        "status": "ok",
-        "service": "hetroserve-router",
-        "runtime": "python-router",
-    }
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/v1/generate")
-async def generate(request: Request) -> JSONResponse:
-    endpoint = "/v1/generate"
-    REQUESTS_TOTAL.labels(endpoint=endpoint).inc()
+async def generate(request: Request) -> dict[str, Any]:
+    body = await request.json()
 
-    payload: Dict[str, Any] = await request.json()
+    request_payload = {
+        "prompt": body.get("prompt", ""),
+        "max_tokens": body.get("max_tokens", 64),
+    }
 
-    pick_data = call_scorer_pick(endpoint)
-    winner = pick_data["winner"]
-    backend_url = winner["url"]
-
-    backend_data = call_backend_generate(
-        endpoint=endpoint,
-        backend_url=backend_url,
-        winner=winner,
-        payload=payload,
-    )
-
-    return JSONResponse(
-        {
-            "router": "hetroserve-router",
-            "policy": pick_data.get("policy"),
-            "selected_backend": {
-                "name": winner.get("name"),
-                "vendor": winner.get("vendor"),
-                "model": winner.get("model"),
-                "url": backend_url,
-                "score": winner.get("score"),
-            },
-            "backend_response": backend_data,
-        }
-    )
+    return route_via_redis("/v1/generate", request_payload)
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: Request) -> JSONResponse:
-    endpoint = "/v1/chat/completions"
-    REQUESTS_TOTAL.labels(endpoint=endpoint).inc()
+async def chat_completions(request: Request) -> dict[str, Any]:
+    body = await request.json()
 
-    openai_payload: Dict[str, Any] = await request.json()
+    prompt = extract_prompt_from_chat(body)
 
-    messages = openai_payload.get("messages", [])
-    if not messages:
-        ERRORS_TOTAL.labels(endpoint=endpoint, error_type="missing_messages").inc()
-        raise HTTPException(
-            status_code=400,
-            detail="Missing required field: messages",
-        )
-
-    model = openai_payload.get("model", "hetroserve-auto")
-    max_tokens = openai_payload.get("max_tokens", 128)
-    temperature = openai_payload.get("temperature", 0.7)
-
-    prompt = messages_to_prompt(messages)
-
-    backend_payload = {
+    request_payload = {
         "prompt": prompt,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "model": model,
+        "max_tokens": body.get("max_tokens", 64),
     }
 
-    pick_data = call_scorer_pick(endpoint)
-    winner = pick_data["winner"]
-    backend_url = winner["url"]
+    routed = route_via_redis("/v1/chat/completions", request_payload)
 
-    backend_data = call_backend_generate(
-        endpoint=endpoint,
-        backend_url=backend_url,
-        winner=winner,
-        payload=backend_payload,
-    )
+    worker_response = routed.get("worker_result", {}).get("response", {})
+    text = worker_response.get("text", "")
 
-    generated_text = extract_text_from_backend_response(backend_data)
-
-    response_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    created = int(time.time())
-
-    return JSONResponse(
-        {
-            "id": response_id,
-            "object": "chat.completion",
-            "created": created,
-            "model": model,
-            "hetroserve": {
-                "router": "hetroserve-router",
-                "policy": pick_data.get("policy"),
-                "selected_backend": {
-                    "name": winner.get("name"),
-                    "vendor": winner.get("vendor"),
-                    "backend_model": winner.get("model"),
-                    "url": backend_url,
-                    "score": winner.get("score"),
+    return {
+        "id": routed["job_id"],
+        "object": "chat.completion",
+        "model": worker_response.get("model", body.get("model", "hetroserve-routed-model")),
+        "routing": {
+            "mode": routed["routing_mode"],
+            "selected_backend": routed["selected_backend"],
+            "selected_vendor": routed["selected_vendor"],
+            "queue": routed["queue"],
+        },
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": text,
                 },
-            },
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": generated_text,
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-            },
-        }
-    )
+                "finish_reason": "stop",
+            }
+        ],
+        "hetroserve": routed,
+    }
