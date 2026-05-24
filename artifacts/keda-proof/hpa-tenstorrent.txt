@@ -1,0 +1,26 @@
+Name:                                                   keda-hpa-hetroserve-worker-tenstorrent-redis
+Namespace:                                              hetroserve-demo
+Labels:                                                 app.kubernetes.io/managed-by=keda-operator
+                                                        app.kubernetes.io/name=keda-hpa-hetroserve-worker-tenstorrent-redis
+                                                        app.kubernetes.io/part-of=hetroserve-worker-tenstorrent-redis
+                                                        app.kubernetes.io/version=2.19.0
+                                                        scaledobject.keda.sh/name=hetroserve-worker-tenstorrent-redis
+Annotations:                                            <none>
+CreationTimestamp:                                      Sun, 24 May 2026 12:25:07 -0700
+Reference:                                              Deployment/hetroserve-worker-tenstorrent
+Metrics:                                                ( current / target )
+  "s0-redis-queue-tenstorrent" (target average value):  0 / 5
+Min replicas:                                           1
+Max replicas:                                           5
+Deployment pods:                                        5 current / 5 desired
+Conditions:
+  Type            Status  Reason               Message
+  ----            ------  ------               -------
+  AbleToScale     True    ScaleDownStabilized  recent recommendations were higher than current one, applying the highest recent recommendation
+  ScalingActive   True    ValidMetricFound     the HPA was able to successfully calculate a replica count from external metric s0-redis-queue-tenstorrent(&LabelSelector{MatchLabels:map[string]string{scaledobject.keda.sh/name: hetroserve-worker-tenstorrent-redis,},MatchExpressions:[]LabelSelectorRequirement{},})
+  ScalingLimited  True    TooManyReplicas      the desired replica count is more than the maximum replica count
+Events:
+  Type    Reason             Age   From                       Message
+  ----    ------             ----  ----                       -------
+  Normal  SuccessfulRescale  108s  horizontal-pod-autoscaler  New size: 4; reason: external metric s0-redis-queue-tenstorrent(&LabelSelector{MatchLabels:map[string]string{scaledobject.keda.sh/name: hetroserve-worker-tenstorrent-redis,},MatchExpressions:[]LabelSelectorRequirement{},}) above target
+  Normal  SuccessfulRescale  93s   horizontal-pod-autoscaler  New size: 5; reason: All metrics below target

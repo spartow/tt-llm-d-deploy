@@ -1,0 +1,3 @@
+NAME                                  SCALETARGETKIND      SCALETARGETNAME                 MIN   MAX   READY   ACTIVE   FALLBACK   PAUSED   TRIGGERS   AUTHENTICATIONS   AGE
+hetroserve-worker-nvidia-redis        apps/v1.Deployment   hetroserve-worker-nvidia        1     5     True    False    False      False    redis                        13m
+hetroserve-worker-tenstorrent-redis   apps/v1.Deployment   hetroserve-worker-tenstorrent   1     5     True    False    False      False    redis                        13m

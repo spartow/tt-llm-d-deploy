@@ -1,0 +1,10 @@
+hetroserve-worker-nvidia-6bcb8cd465-cdl9v       1/1     Running   0             108s
+hetroserve-worker-nvidia-6bcb8cd465-g886t       1/1     Running   0             12h
+hetroserve-worker-nvidia-6bcb8cd465-hz8vx       1/1     Running   0             93s
+hetroserve-worker-nvidia-6bcb8cd465-rf5vv       1/1     Running   0             108s
+hetroserve-worker-nvidia-6bcb8cd465-vmrr7       1/1     Running   0             108s
+hetroserve-worker-tenstorrent-85fc69685-b7zfc   1/1     Running   0             12h
+hetroserve-worker-tenstorrent-85fc69685-nz6nt   1/1     Running   0             108s
+hetroserve-worker-tenstorrent-85fc69685-qjg5n   1/1     Running   0             93s
+hetroserve-worker-tenstorrent-85fc69685-sb79z   1/1     Running   0             108s
+hetroserve-worker-tenstorrent-85fc69685-xrcp6   1/1     Running   0             108s

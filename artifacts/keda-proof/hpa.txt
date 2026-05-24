@@ -1,0 +1,3 @@
+NAME                                           REFERENCE                                  TARGETS     MINPODS   MAXPODS   REPLICAS   AGE
+keda-hpa-hetroserve-worker-nvidia-redis        Deployment/hetroserve-worker-nvidia        0/5 (avg)   1         5         5          13m
+keda-hpa-hetroserve-worker-tenstorrent-redis   Deployment/hetroserve-worker-tenstorrent   0/5 (avg)   1         5         5          13m

@@ -1,0 +1,64 @@
+Name:         hetroserve-worker-tenstorrent-redis
+Namespace:    hetroserve-demo
+Labels:       scaledobject.keda.sh/name=hetroserve-worker-tenstorrent-redis
+Annotations:  <none>
+API Version:  keda.sh/v1alpha1
+Kind:         ScaledObject
+Metadata:
+  Creation Timestamp:  2026-05-24T19:25:07Z
+  Finalizers:
+    finalizer.keda.sh
+  Generation:        1
+  Resource Version:  40405
+  UID:               c67417cf-d715-4bd9-a1d0-58de7df9fdcd
+Spec:
+  Cooldown Period:    30
+  Max Replica Count:  5
+  Min Replica Count:  1
+  Polling Interval:   5
+  Scale Target Ref:
+    Name:  hetroserve-worker-tenstorrent
+  Triggers:
+    Metadata:
+      Address:      hetroserve-redis.hetroserve-demo.svc.cluster.local:6379
+      List Length:  5
+      List Name:    queue:tenstorrent
+    Type:           redis
+Status:
+  Authentications Types:  
+  Conditions:
+    Message:  ScaledObject is defined correctly and is ready for scaling
+    Reason:   ScaledObjectReady
+    Status:   True
+    Type:     Ready
+    Message:  Scaling is not performed because triggers are not active
+    Reason:   ScalerNotActive
+    Status:   False
+    Type:     Active
+    Message:  No fallbacks are active on this scaled object
+    Reason:   NoFallbackFound
+    Status:   False
+    Type:     Fallback
+    Status:   False
+    Type:     Paused
+  External Metric Names:
+    s0-redis-queue-tenstorrent
+  Hpa Name:                keda-hpa-hetroserve-worker-tenstorrent-redis
+  Last Active Time:        2026-05-24T19:37:11Z
+  Original Replica Count:  1
+  Scale Target GVKR:
+    Group:            apps
+    Kind:             Deployment
+    Resource:         deployments
+    Version:          v1
+  Scale Target Kind:  apps/v1.Deployment
+  Triggers Activity:
+    s0-redis-queue-tenstorrent:
+      Is Active:   false
+  Triggers Types:  redis
+Events:
+  Type    Reason              Age   From           Message
+  ----    ------              ----  ----           -------
+  Normal  KEDAScalersStarted  13m   keda-operator  Scaler redis is built
+  Normal  KEDAScalersStarted  13m   keda-operator  Started scalers watch
+  Normal  ScaledObjectReady   13m   keda-operator  ScaledObject is ready for scaling
