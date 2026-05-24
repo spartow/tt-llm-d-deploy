@@ -25,6 +25,8 @@ spec:
           env:
             - name: SCORER_URL
               value: "http://hetroserve-scorer:8080"
+            - name: SCORER_MODE
+              value: "epp"
             - name: REDIS_HOST
               value: "hetroserve-redis"
             - name: REDIS_PORT

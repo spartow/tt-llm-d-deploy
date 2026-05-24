@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 SCORER_URL = os.getenv("SCORER_URL", "http://hetroserve-scorer:8080")
+SCORER_MODE = os.getenv("SCORER_MODE", "legacy").lower()
 REDIS_HOST = os.getenv("REDIS_HOST", "hetroserve-redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 RESULT_TIMEOUT_SECONDS = float(os.getenv("RESULT_TIMEOUT_SECONDS", "30"))
@@ -73,10 +74,54 @@ def extract_prompt_from_chat(body: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+
+def build_epp_request() -> dict:
+    return {
+        "request_id": "router-epp-pick",
+        "model": "demo-llm",
+        "tenant": "demo",
+        "strategy": "cost_latency_score",
+        "latency_slo_ms": float(os.getenv("LATENCY_SLO_MS", "800")),
+        "endpoints": [
+            {
+                "name": "nvidia",
+                "url": os.getenv("NVIDIA_URL", "http://mock-nvidia:8000"),
+                "vendor": "nvidia",
+                "model": "demo-llm",
+                "metrics": {
+                    "latency_ms": float(os.getenv("NVIDIA_LATENCY_MS", "120")),
+                    "queue_depth": int(os.getenv("NVIDIA_QUEUE_DEPTH", "2")),
+                    "cost_per_1k_tokens": float(os.getenv("NVIDIA_COST_PER_1K_TOKENS", "0.02")),
+                    "healthy": os.getenv("NVIDIA_HEALTHY", "true").lower() == "true",
+                },
+            },
+            {
+                "name": "tenstorrent",
+                "url": os.getenv("TENSTORRENT_URL", "http://mock-tenstorrent:8000"),
+                "vendor": "tenstorrent",
+                "model": "demo-llm",
+                "metrics": {
+                    "latency_ms": float(os.getenv("TENSTORRENT_LATENCY_MS", "180")),
+                    "queue_depth": int(os.getenv("TENSTORRENT_QUEUE_DEPTH", "1")),
+                    "cost_per_1k_tokens": float(os.getenv("TENSTORRENT_COST_PER_1K_TOKENS", "0.006")),
+                    "healthy": os.getenv("TENSTORRENT_HEALTHY", "true").lower() == "true",
+                },
+            },
+        ],
+    }
+
+
 def call_scorer() -> dict[str, Any]:
     started = time.time()
     try:
-        response = requests.get(f"{SCORER_URL}/pick", timeout=10)
+        if SCORER_MODE == "epp":
+            response = requests.post(
+                f"{SCORER_URL}/epp/pick",
+                json=build_epp_request(),
+                timeout=10,
+            )
+        else:
+            response = requests.get(f"{SCORER_URL}/pick", timeout=10)
         response.raise_for_status()
         return response.json()
     finally:
@@ -204,6 +249,7 @@ def health() -> dict[str, str]:
         "routing_mode": "redis_queue",
         "redis": f"{REDIS_HOST}:{REDIS_PORT}",
         "scorer_url": SCORER_URL,
+        "scorer_mode": SCORER_MODE,
     }
 
 
