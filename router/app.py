@@ -17,6 +17,10 @@ app = FastAPI(title="HetroServe Router", version="0.1.0")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("hetroserve-router")
 
+def log_event(event: str, **fields: Any) -> None:
+    logger.info(json.dumps({"event": event, **fields}, sort_keys=True))
+
+
 LAST_EPP_REQUEST: Dict[str, Any] = {}
 
 SCORER_URL = os.getenv("SCORER_URL", "http://hetroserve-scorer:8080")
@@ -263,14 +267,33 @@ def call_backend_via_redis_queue(
         "backend_url": backend.get("url", ""),
     }
 
-    client.rpush(queue_name, __import__("json").dumps(job))
+    log_event(
+        "redis_job_created",
+        selected_backend=backend_name,
+        selected_vendor=backend.get("vendor", "unknown"),
+        queue=queue_name,
+        job_id=job_id,
+        request_id=request_id,
+        result_key=response_key,
+    )
+
+    client.rpush(queue_name, json.dumps(job))
 
     deadline = time.time() + 30
     while time.time() < deadline:
         raw = client.get(response_key)
         if raw:
+            log_event(
+                "redis_job_completed",
+                selected_backend=backend_name,
+                selected_vendor=backend.get("vendor", "unknown"),
+                queue=queue_name,
+                job_id=job_id,
+                request_id=request_id,
+                result_key=response_key,
+            )
             client.delete(response_key)
-            return __import__("json").loads(raw)
+            return json.loads(raw)
         time.sleep(0.1)
 
     raise TimeoutError(f"Timed out waiting for worker response on {response_key}")
@@ -395,6 +418,23 @@ def generate(request: GenerateRequest) -> Dict[str, Any]:
     start = time.time()
     scorer_response = call_scorer()
     selected_backend = selected_from_scorer(scorer_response)
+
+    scorer_endpoint = "/epp/pick" if SCORER_MODE == "epp" else "/pick"
+    planned_queue = (
+        queue_name_for_backend(selected_backend["name"])
+        if ROUTING_MODE == "redis_queue"
+        else None
+    )
+
+    log_event(
+        "routing_decision",
+        routing_mode=ROUTING_MODE,
+        scorer_mode=SCORER_MODE,
+        scorer_endpoint=scorer_endpoint,
+        selected_backend=selected_backend["name"],
+        selected_vendor=selected_backend["vendor"],
+        queue=planned_queue,
+    )
 
     if ROUTING_MODE == "redis_queue":
         backend_response = call_backend_via_redis_queue(
