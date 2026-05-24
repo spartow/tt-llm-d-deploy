@@ -1,0 +1,18 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: hetroserve-worker-nvidia-redis
+  namespace: hetroserve-demo
+spec:
+  scaleTargetRef:
+    name: hetroserve-worker-nvidia
+  pollingInterval: 5
+  cooldownPeriod: 30
+  minReplicaCount: 1
+  maxReplicaCount: 5
+  triggers:
+    - type: redis
+      metadata:
+        address: hetroserve-redis.hetroserve-demo.svc.cluster.local:6379
+        listName: queue:nvidia
+        listLength: "5"
