@@ -7,28 +7,29 @@ data:
   prometheus.yml: |
     global:
       scrape_interval: 5s
+      evaluation_interval: 5s
 
     scrape_configs:
+      - job_name: "prometheus"
+        static_configs:
+          - targets: ["localhost:9090"]
+
       - job_name: "hetroserve-router"
         metrics_path: /metrics
         static_configs:
-          - targets:
-              - "hetroserve-router:8080"
+          - targets: ["hetroserve-router:8080"]
 
       - job_name: "hetroserve-scorer"
         metrics_path: /metrics
         static_configs:
-          - targets:
-              - "hetroserve-scorer:8080"
+          - targets: ["hetroserve-scorer:8080"]
 
-      - job_name: "mock-nvidia"
+      - job_name: "hetroserve-worker-nvidia"
         metrics_path: /metrics
         static_configs:
-          - targets:
-              - "mock-nvidia:8000"
+          - targets: ["hetroserve-worker-nvidia:8080"]
 
-      - job_name: "mock-tenstorrent"
+      - job_name: "hetroserve-worker-tenstorrent"
         metrics_path: /metrics
         static_configs:
-          - targets:
-              - "mock-tenstorrent:8000"
+          - targets: ["hetroserve-worker-tenstorrent:8080"]
