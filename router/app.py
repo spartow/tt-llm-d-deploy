@@ -307,6 +307,84 @@ def debug_epp_request() -> Dict[str, Any]:
     }
 
 
+@app.get("/debug/routing-decision")
+def debug_routing_decision() -> Dict[str, Any]:
+    """
+    Preview the full router decision path without enqueueing a Redis job.
+
+    Shows:
+    - raw debug EPP payload generated from live/fallback backend metrics
+    - scorer-compatible nested EPP payload
+    - scorer response
+    - selected backend/vendor
+    - queue name that would be used
+    """
+    raw_payload = build_epp_request()
+
+    scorer_compatible_payload = {
+        "request": {
+            "request_id": raw_payload.get("request_id"),
+            "model": raw_payload.get("model"),
+            "prompt_tokens": raw_payload.get("prompt_tokens"),
+            "max_tokens": raw_payload.get("max_tokens"),
+        },
+        "endpoints": [],
+    }
+
+    for endpoint in raw_payload.get("endpoints", []):
+        scorer_compatible_payload["endpoints"].append(
+            {
+                "name": endpoint.get("name"),
+                "url": endpoint.get("url"),
+                "vendor": endpoint.get("vendor"),
+                "model": endpoint.get("model"),
+                "metrics": {
+                    "latency_ms": endpoint.get("latency_ms"),
+                    "queue_depth": endpoint.get("queue_depth"),
+                    "cost_per_1k_tokens": endpoint.get("cost_per_1k_tokens"),
+                    "healthy": endpoint.get("healthy"),
+                    "metrics_source": endpoint.get("metrics_source"),
+                },
+            }
+        )
+
+    scorer_endpoint = "/pick"
+
+    if SCORER_MODE == "epp":
+        scorer_endpoint = "/epp/pick"
+        scorer_http_response = requests.post(
+            f"{SCORER_URL.rstrip('/')}{scorer_endpoint}",
+            json=scorer_compatible_payload,
+            timeout=5,
+        )
+    else:
+        scorer_http_response = requests.get(
+            f"{SCORER_URL.rstrip('/')}{scorer_endpoint}",
+            timeout=5,
+        )
+
+    scorer_http_response.raise_for_status()
+    scorer_response = scorer_http_response.json()
+
+    selected_backend = selected_from_scorer(scorer_response)
+    queue = queue_name_for_backend(selected_backend["name"])
+
+    return {
+        "status": "ok",
+        "routing_mode": ROUTING_MODE,
+        "scorer_mode": SCORER_MODE,
+        "scorer_url": SCORER_URL,
+        "scorer_endpoint": scorer_endpoint,
+        "raw_debug_epp_payload": raw_payload,
+        "scorer_compatible_payload": scorer_compatible_payload,
+        "scorer_response": scorer_response,
+        "selected_backend": selected_backend["name"],
+        "selected_vendor": selected_backend["vendor"],
+        "queue": queue,
+        "would_enqueue": ROUTING_MODE == "redis_queue",
+    }
+
+
 @app.get("/metrics")
 def metrics() -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
