@@ -31,20 +31,20 @@ jobs:
 
       - name: Repo smoke check
         run: |
-          find . -maxdepth 4 -type f | sort
           test -f README.md
           test -f LICENSE
           test -f CONTRIBUTING.md
+          find . -maxdepth 4 -type f | sort
 
-  kubernetes-manifest-validation:
-    name: Kubernetes manifest validation
+  yaml-validation:
+    name: YAML validation
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install YAML parser
+      - name: Install YAML tools
         run: |
           python -m pip install --upgrade pip
           pip install pyyaml yamllint
@@ -74,16 +74,5 @@ jobs:
                   continue
               list(yaml.safe_load_all(text))
 
-          print("YAML syntax validation passed")
+          print("YAML validation passed")
           PY
-
-      - name: Check Kubernetes-like manifests
-        run: |
-          set -e
-          echo "Checking files that look like Kubernetes manifests..."
-          for f in $(find . -type f \( -name "*.yaml" -o -name "*.yml" \) | grep -v ".github"); do
-            if grep -q "apiVersion:" "$f" && grep -q "kind:" "$f"; then
-              echo "Kubernetes manifest found: $f"
-            fi
-          done
-          echo "Manifest discovery passed"
