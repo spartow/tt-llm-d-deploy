@@ -1,4 +1,28 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
-benchmark/results/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local backups / scratch
+backup/
+*.bak
+*.bak-*
+router/app.py.bak-epp
+
+# Local build artifacts / binaries
+hetroserve-router
+hetroserve-scorer
+mock
+Redis
+
+# Local proof captures / generated artifacts
+artifacts/keda-proof/*.txt
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
