@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -11,9 +12,11 @@ ROUTER_APP = ROOT / "router" / "app.py"
 
 def clear_router_prometheus_collectors():
     """
-    router/app.py creates Prometheus metrics at import time.
-    Dynamic imports across tests can duplicate collectors unless we unregister
-    the router-owned collectors first.
+    router/app.py creates Prometheus collectors at import time.
+    Re-importing it in tests can raise:
+      ValueError: Duplicated timeseries in CollectorRegistry
+
+    Clear only router-owned collectors before each dynamic import.
     """
     collectors = list(REGISTRY._collector_to_names.keys())
 
@@ -224,13 +227,14 @@ def test_redis_contract_uses_job_id_result_key(monkeypatch):
         def __init__(self):
             self.pushed = []
             self.get_calls = []
+            self.deleted = None
 
         def rpush(self, queue, value):
             self.pushed.append((queue, value))
 
         def get(self, key):
             self.get_calls.append(key)
-            return '{"text":"ok","backend":"tenstorrent"}'
+            return json.dumps({"text": "ok", "backend": "tenstorrent"})
 
         def delete(self, key):
             self.deleted = key
@@ -248,9 +252,11 @@ def test_redis_contract_uses_job_id_result_key(monkeypatch):
     result = router.enqueue_and_wait(selected_backend, {"prompt": "hello"})
 
     queue, raw_job = fake_redis.pushed[0]
+    job = json.loads(raw_job)
 
     assert queue == "queue:tenstorrent"
-    assert '"job_id": "job-' in raw_job
-    assert '"request_id": "job-' in raw_job
-    assert fake_redis.get_calls[0].startswith("result:job-")
+    assert job["job_id"].startswith("job-")
+    assert job["request_id"] == job["job_id"]
+    assert fake_redis.get_calls[0] == f"result:{job['job_id']}"
+    assert fake_redis.deleted == f"result:{job['job_id']}"
     assert result["text"] == "ok"
