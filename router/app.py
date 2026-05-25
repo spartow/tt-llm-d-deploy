@@ -24,6 +24,7 @@ def log_event(event: str, **fields: Any) -> None:
 LAST_EPP_REQUEST: Dict[str, Any] = {}
 
 SCORER_URL = os.getenv("SCORER_URL", "http://hetroserve-scorer:8080")
+SCORER_KV_CACHE_WEIGHT = float(os.getenv("SCORER_KV_CACHE_WEIGHT", "0.15"))
 SCORER_MODE = os.getenv("SCORER_MODE", "legacy").lower()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
