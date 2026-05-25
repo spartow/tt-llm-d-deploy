@@ -133,6 +133,31 @@ tt-llm-d-deploy/
 - [`tt-llm-d-scorer`](https://github.com/spartow/tt-llm-d-scorer) — the Go scorer library and HTTP service
 - [`tt-llm-d-platform`](https://github.com/spartow/tt-llm-d-platform) — vLLM platform plugin (in progress)
 
+## CI / Test Status
+
+Automated validation is configured through `.github/workflows/test.yml`.
+
+Local validation:
+
+- `pytest -q`
+- Current expected result: `7 passed`
+
+Router test coverage includes EPP scorer mode, nested EPP payload construction, Redis job/result key contract, debug endpoint gating, and duplicate Prometheus metric protection.
+
+## Proof Milestones
+
+HetroServe includes local Kubernetes proof artifacts that verify the core heterogeneous inference routing path.
+
+Proof index: [`proofs/README.md`](proofs/README.md)
+
+Current proof artifacts:
+
+- [`proofs/router-live-epp-payload-debug-proof.md`](proofs/router-live-epp-payload-debug-proof.md)
+- [`proofs/post-debug-gate-e2e-routing-proof.md`](proofs/post-debug-gate-e2e-routing-proof.md)
+- [`proofs/production-safe-debug-disabled-proof.md`](proofs/production-safe-debug-disabled-proof.md)
+
+Verified capabilities include Redis queue routing, EPP scorer integration, live backend telemetry from `/control`, worker-to-backend execution, structured router decision logs, and production-safe debug endpoint gating.
+
 ## Roadmap to v0.2
 
 The current scorer is a standalone HTTP service that the router consults out-of-band. The next milestone is to make it a real `llm-d` Endpoint Picker:
