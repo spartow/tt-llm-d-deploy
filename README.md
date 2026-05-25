@@ -158,6 +158,14 @@ Current proof artifacts:
 
 Verified capabilities include Redis queue routing, EPP scorer integration, live backend telemetry from `/control`, worker-to-backend execution, structured router decision logs, and production-safe debug endpoint gating.
 
+## Demo Runbook
+
+Run the local Kubernetes demo using the step-by-step guide:
+
+- [`docs/demo-runbook.md`](docs/demo-runbook.md)
+
+The runbook covers tests, router image build/load, Kubernetes rollout, `/v1/generate`, EPP routing proof, Redis queue execution, and production-safe debug-disabled verification.
+
 ## Roadmap to v0.2
 
 The current scorer is a standalone HTTP service that the router consults out-of-band. The next milestone is to make it a real `llm-d` Endpoint Picker:
