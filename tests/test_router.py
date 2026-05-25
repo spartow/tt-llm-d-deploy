@@ -1,197 +1,256 @@
 import importlib.util
-import json
 import sys
 from pathlib import Path
-from unittest.mock import Mock
 
 from prometheus_client import REGISTRY
 
 
-ROUTER_APP_PATH = Path(__file__).resolve().parents[1] / "router" / "app.py"
+ROOT = Path(__file__).resolve().parents[1]
+ROUTER_APP = ROOT / "router" / "app.py"
 
 
 def clear_router_prometheus_collectors():
-    for collector, names in list(REGISTRY._collector_to_names.items()):
+    """
+    router/app.py creates Prometheus metrics at import time.
+    Dynamic imports across tests can duplicate collectors unless we unregister
+    the router-owned collectors first.
+    """
+    collectors = list(REGISTRY._collector_to_names.keys())
+
+    for collector in collectors:
+        names = REGISTRY._collector_to_names.get(collector, [])
         if any(name.startswith("hetroserve_router_") for name in names):
-            REGISTRY.unregister(collector)
+            try:
+                REGISTRY.unregister(collector)
+            except KeyError:
+                pass
 
 
-def load_router_module(monkeypatch):
+def load_router_app(monkeypatch, **env):
     clear_router_prometheus_collectors()
 
-    monkeypatch.setenv("SCORER_MODE", "epp")
-    monkeypatch.setenv("ROUTING_MODE", "redis_queue")
-    monkeypatch.setenv("SCORER_URL", "http://hetroserve-scorer:8080")
-    monkeypatch.setenv("REDIS_URL", "redis://hetroserve-redis:6379/0")
+    defaults = {
+        "ROUTING_MODE": "redis_queue",
+        "SCORER_MODE": "epp",
+        "SCORER_URL": "http://hetroserve-scorer:8080",
+        "REDIS_URL": "redis://hetroserve-redis:6379/0",
+        "NVIDIA_BACKEND_URL": "http://mock-nvidia:8000",
+        "TENSTORRENT_BACKEND_URL": "http://mock-tenstorrent:8000",
+    }
+
+    for key, value in {**defaults, **env}.items():
+        monkeypatch.setenv(key, value)
 
     module_name = "router_app_under_test"
     sys.modules.pop(module_name, None)
 
-    spec = importlib.util.spec_from_file_location(module_name, ROUTER_APP_PATH)
+    spec = importlib.util.spec_from_file_location(module_name, ROUTER_APP)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+
     return module
 
 
 def test_build_epp_request_uses_live_control_metrics(monkeypatch):
-    router = load_router_module(monkeypatch)
+    router = load_router_app(monkeypatch)
 
-    def fake_get(url, timeout):
-        response = Mock()
-        response.raise_for_status = Mock()
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
 
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    def fake_get(url, timeout=2):
         if "mock-nvidia" in url:
-            response.json.return_value = {
-                "backend": "nvidia",
-                "vendor": "nvidia",
-                "control": {
-                    "latency_ms": 111.0,
-                    "queue_depth": 3,
-                    "cost_per_1k_tokens": 0.021,
-                    "healthy": True,
-                },
-            }
-        elif "mock-tenstorrent" in url:
-            response.json.return_value = {
-                "backend": "tenstorrent",
-                "vendor": "tenstorrent",
-                "control": {
-                    "latency_ms": 222.0,
-                    "queue_depth": 1,
-                    "cost_per_1k_tokens": 0.006,
-                    "healthy": True,
-                },
-            }
-        else:
-            raise AssertionError(f"unexpected url: {url}")
-
-        return response
-
-    monkeypatch.setattr(router.requests, "get", fake_get)
-
-    payload = router.build_epp_request()
-    endpoints = {endpoint["name"]: endpoint for endpoint in payload["endpoints"]}
-
-    assert endpoints["nvidia"]["latency_ms"] == 111.0
-    assert endpoints["nvidia"]["queue_depth"] == 3
-    assert endpoints["nvidia"]["metrics_source"] == "live_control"
-
-    assert endpoints["tenstorrent"]["latency_ms"] == 222.0
-    assert endpoints["tenstorrent"]["queue_depth"] == 1
-    assert endpoints["tenstorrent"]["metrics_source"] == "live_control"
-
-
-def test_build_epp_request_falls_back_to_env_defaults(monkeypatch):
-    router = load_router_module(monkeypatch)
-
-    def fake_get(url, timeout):
-        raise RuntimeError("control endpoint unavailable")
-
-    monkeypatch.setattr(router.requests, "get", fake_get)
-
-    payload = router.build_epp_request()
-    endpoints = {endpoint["name"]: endpoint for endpoint in payload["endpoints"]}
-
-    assert endpoints["nvidia"]["latency_ms"] == 120.0
-    assert endpoints["nvidia"]["queue_depth"] == 2
-    assert endpoints["nvidia"]["metrics_source"] == "env_fallback"
-
-    assert endpoints["tenstorrent"]["latency_ms"] == 180.0
-    assert endpoints["tenstorrent"]["queue_depth"] == 1
-    assert endpoints["tenstorrent"]["metrics_source"] == "env_fallback"
-
-
-def test_selected_from_scorer_accepts_epp_selected_shape(monkeypatch):
-    router = load_router_module(monkeypatch)
-
-    selected = router.selected_from_scorer(
-        {
-            "selected": {
-                "name": "tenstorrent",
-                "vendor": "tenstorrent",
-                "url": "http://mock-tenstorrent:8000",
-            }
-        }
-    )
-
-    assert selected == {
-        "name": "tenstorrent",
-        "vendor": "tenstorrent",
-        "url": "http://mock-tenstorrent:8000",
-    }
-
-
-def test_selected_from_scorer_accepts_winner_shape(monkeypatch):
-    router = load_router_module(monkeypatch)
-
-    selected = router.selected_from_scorer(
-        {
-            "winner": {
-                "name": "nvidia",
-                "vendor": "nvidia",
-                "url": "http://mock-nvidia:8000",
-            }
-        }
-    )
-
-    assert selected == {
-        "name": "nvidia",
-        "vendor": "nvidia",
-        "url": "http://mock-nvidia:8000",
-    }
-
-
-def test_redis_job_contract_uses_job_id_result_key(monkeypatch):
-    router = load_router_module(monkeypatch)
-
-    pushed = {}
-
-    class FakeRedis:
-        def rpush(self, queue_name, payload):
-            pushed["queue_name"] = queue_name
-            pushed["payload"] = json.loads(payload)
-
-        def get(self, key):
-            pushed["result_key"] = key
-            return json.dumps(
+            return FakeResponse(
                 {
-                    "job_id": pushed["payload"]["job_id"],
-                    "backend": "tenstorrent",
-                    "queue": pushed["queue_name"],
-                    "response": {"text": "ok"},
+                    "backend": "nvidia",
+                    "vendor": "nvidia",
+                    "control": {
+                        "latency_ms": 250,
+                        "queue_depth": 4,
+                        "cost_per_1k_tokens": 0.02,
+                        "healthy": True,
+                    },
                 }
             )
 
-        def delete(self, key):
-            pushed["deleted_key"] = key
+        if "mock-tenstorrent" in url:
+            return FakeResponse(
+                {
+                    "backend": "tenstorrent",
+                    "vendor": "tenstorrent",
+                    "control": {
+                        "latency_ms": 100,
+                        "queue_depth": 1,
+                        "cost_per_1k_tokens": 0.005,
+                        "healthy": True,
+                    },
+                }
+            )
 
-    class FakeRedisModule:
-        class Redis:
-            @staticmethod
-            def from_url(url, decode_responses):
-                pushed["redis_url"] = url
-                pushed["decode_responses"] = decode_responses
-                return FakeRedis()
+        raise AssertionError(f"unexpected URL: {url}")
 
-    monkeypatch.setitem(sys.modules, "redis", FakeRedisModule)
+    monkeypatch.setattr(router.requests, "get", fake_get)
 
-    response = router.call_backend_via_redis_queue(
-        {
-            "name": "tenstorrent",
-            "vendor": "tenstorrent",
-            "url": "http://mock-tenstorrent:8000",
-        },
-        prompt="hello",
-        max_tokens=16,
+    payload = router.build_epp_request()
+
+    assert payload["metrics_source"] == "live_control"
+    assert payload["endpoints"]["nvidia"]["latency_ms"] == 250
+    assert payload["endpoints"]["nvidia"]["queue_depth"] == 4
+    assert payload["endpoints"]["tenstorrent"]["latency_ms"] == 100
+    assert payload["endpoints"]["tenstorrent"]["queue_depth"] == 1
+
+
+def test_build_epp_request_falls_back_to_env_defaults(monkeypatch):
+    router = load_router_app(
+        monkeypatch,
+        NVIDIA_LATENCY_MS="900",
+        NVIDIA_QUEUE_DEPTH="8",
+        TENSTORRENT_LATENCY_MS="120",
+        TENSTORRENT_QUEUE_DEPTH="2",
     )
 
-    payload = pushed["payload"]
+    def fake_get(url, timeout=2):
+        raise router.requests.RequestException("control unavailable")
 
-    assert pushed["redis_url"] == "redis://hetroserve-redis:6379/0"
-    assert pushed["decode_responses"] is True
-    assert pushed["queue_name"] == "queue:tenstorrent"
-    assert payload["job_id"].startswith("job-")
-    assert payload["request_id"] == payload["job_id"]
-    assert pushed["result_key"] == f"result:{payload['job_id']}"
-    assert pushed["deleted_key"] == f"result:{payload['job_id']}"
-    assert response["job_id"] == payload["job_id"]
+    monkeypatch.setattr(router.requests, "get", fake_get)
+
+    payload = router.build_epp_request()
+
+    assert payload["metrics_source"] == "env_fallback"
+    assert payload["endpoints"]["nvidia"]["latency_ms"] == 900.0
+    assert payload["endpoints"]["nvidia"]["queue_depth"] == 8
+    assert payload["endpoints"]["tenstorrent"]["latency_ms"] == 120.0
+    assert payload["endpoints"]["tenstorrent"]["queue_depth"] == 2
+
+
+def test_convert_debug_payload_to_scorer_payload(monkeypatch):
+    router = load_router_app(monkeypatch)
+
+    debug_payload = {
+        "request": {"model": "demo-model"},
+        "endpoints": {
+            "nvidia": {
+                "name": "nvidia",
+                "url": "http://mock-nvidia:8000",
+                "vendor": "nvidia",
+                "model": "demo-model",
+                "latency_ms": 300,
+                "queue_depth": 5,
+                "cost_per_1k_tokens": 0.02,
+                "healthy": True,
+            },
+            "tenstorrent": {
+                "name": "tenstorrent",
+                "url": "http://mock-tenstorrent:8000",
+                "vendor": "tenstorrent",
+                "model": "demo-model",
+                "latency_ms": 120,
+                "queue_depth": 1,
+                "cost_per_1k_tokens": 0.005,
+                "healthy": True,
+            },
+        },
+        "metrics_source": "live_control",
+    }
+
+    scorer_payload = router.to_scorer_epp_payload(debug_payload)
+
+    assert "endpoints" in scorer_payload
+    assert scorer_payload["endpoints"][0]["name"] == "nvidia"
+    assert scorer_payload["endpoints"][0]["metrics"]["latency_ms"] == 300
+    assert scorer_payload["endpoints"][1]["name"] == "tenstorrent"
+    assert scorer_payload["endpoints"][1]["metrics"]["queue_depth"] == 1
+
+
+def test_pick_backend_posts_epp_payload(monkeypatch):
+    router = load_router_app(monkeypatch)
+
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "winner": {
+                    "name": "tenstorrent",
+                    "url": "http://mock-tenstorrent:8000",
+                    "vendor": "tenstorrent",
+                }
+            }
+
+    def fake_post(url, json, timeout=5):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr(router.requests, "post", fake_post)
+
+    debug_payload = {
+        "request": {"model": "demo-model"},
+        "endpoints": {
+            "tenstorrent": {
+                "name": "tenstorrent",
+                "url": "http://mock-tenstorrent:8000",
+                "vendor": "tenstorrent",
+                "model": "demo-model",
+                "latency_ms": 120,
+                "queue_depth": 1,
+                "cost_per_1k_tokens": 0.005,
+                "healthy": True,
+            }
+        },
+        "metrics_source": "live_control",
+    }
+
+    selected = router.pick_backend(debug_payload)
+
+    assert captured["url"] == "http://hetroserve-scorer:8080/epp/pick"
+    assert captured["json"]["endpoints"][0]["metrics"]["latency_ms"] == 120
+    assert selected["name"] == "tenstorrent"
+
+
+def test_redis_contract_uses_job_id_result_key(monkeypatch):
+    router = load_router_app(monkeypatch)
+
+    class FakeRedis:
+        def __init__(self):
+            self.pushed = []
+            self.get_calls = []
+
+        def rpush(self, queue, value):
+            self.pushed.append((queue, value))
+
+        def get(self, key):
+            self.get_calls.append(key)
+            return '{"text":"ok","backend":"tenstorrent"}'
+
+        def delete(self, key):
+            self.deleted = key
+
+    fake_redis = FakeRedis()
+
+    monkeypatch.setattr(router, "redis_client", fake_redis)
+
+    selected_backend = {
+        "name": "tenstorrent",
+        "url": "http://mock-tenstorrent:8000",
+        "vendor": "tenstorrent",
+    }
+
+    result = router.enqueue_and_wait(selected_backend, {"prompt": "hello"})
+
+    queue, raw_job = fake_redis.pushed[0]
+
+    assert queue == "queue:tenstorrent"
+    assert '"job_id": "job-' in raw_job
+    assert '"request_id": "job-' in raw_job
+    assert fake_redis.get_calls[0].startswith("result:job-")
+    assert result["text"] == "ok"
