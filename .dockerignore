@@ -1,0 +1,38 @@
+# Git / editor
+.git
+.gitignore
+.vscode
+.idea
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local/generated outputs
+benchmark/results/
+artifacts/
+proofs/
+backup/
+*.bak
+*.tmp
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Node/npm if ever present
+node_modules/
+npm-debug.log
+
+# Docker/build noise
+Dockerfile.*
+docker-compose*.yml
