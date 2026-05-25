@@ -1,0 +1,141 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: heterogeneousservices.inference.hetroserve.ai
+spec:
+  group: inference.hetroserve.ai
+  scope: Namespaced
+  names:
+    plural: heterogeneousservices
+    singular: heterogeneousservice
+    kind: HeterogeneousService
+    shortNames:
+      - hsvc
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - model
+                - routingPolicy
+                - backends
+              properties:
+                model:
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                    version:
+                      type: string
+                    task:
+                      type: string
+                      enum:
+                        - text-generation
+                        - chat-completion
+                        - embedding
+                routingPolicy:
+                  type: object
+                  properties:
+                    mode:
+                      type: string
+                      enum:
+                        - cost-aware
+                        - latency-aware
+                        - balanced
+                        - kv-cache-aware
+                    scorerMode:
+                      type: string
+                      enum:
+                        - epp
+                        - legacy
+                    redisQueue:
+                      type: object
+                      properties:
+                        enabled:
+                          type: boolean
+                        redisUrlSecretRef:
+                          type: string
+                    weights:
+                      type: object
+                      properties:
+                        latency:
+                          type: number
+                        queueDepth:
+                          type: number
+                        cost:
+                          type: number
+                        health:
+                          type: number
+                        kvCacheLocality:
+                          type: number
+                backends:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - vendor
+                      - endpoint
+                    properties:
+                      name:
+                        type: string
+                      vendor:
+                        type: string
+                        enum:
+                          - nvidia
+                          - amd
+                          - tenstorrent
+                          - hyperaccel
+                          - rebellions
+                          - furiosa
+                          - cpu
+                          - other
+                      endpoint:
+                        type: string
+                      controlEndpoint:
+                        type: string
+                      queue:
+                        type: string
+                      accelerator:
+                        type: object
+                        properties:
+                          type:
+                            type: string
+                          memoryGiB:
+                            type: number
+                          count:
+                            type: integer
+                      enabled:
+                        type: boolean
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                selectedBackend:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+      subresources:
+        status: {}

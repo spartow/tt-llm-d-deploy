@@ -1,0 +1,43 @@
+apiVersion: inference.hetroserve.ai/v1alpha1
+kind: HeterogeneousService
+metadata:
+  name: llama-demo
+  namespace: hetroserve-demo
+spec:
+  model:
+    name: llama-demo
+    version: local
+    task: text-generation
+  routingPolicy:
+    mode: balanced
+    scorerMode: epp
+    redisQueue:
+      enabled: true
+      redisUrlSecretRef: hetroserve-redis-url
+    weights:
+      latency: 0.30
+      queueDepth: 0.25
+      cost: 0.20
+      health: 0.10
+      kvCacheLocality: 0.15
+  backends:
+    - name: nvidia
+      vendor: nvidia
+      endpoint: http://mock-nvidia:8000
+      controlEndpoint: http://mock-nvidia:8000/control
+      queue: queue:nvidia
+      enabled: true
+      accelerator:
+        type: gpu
+        memoryGiB: 80
+        count: 1
+    - name: tenstorrent
+      vendor: tenstorrent
+      endpoint: http://mock-tenstorrent:8000
+      controlEndpoint: http://mock-tenstorrent:8000/control
+      queue: queue:tenstorrent
+      enabled: true
+      accelerator:
+        type: ai-accelerator
+        memoryGiB: 32
+        count: 1
