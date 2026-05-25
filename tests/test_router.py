@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import pytest
 import sys
 from pathlib import Path
 
@@ -269,3 +270,34 @@ def test_redis_contract_uses_job_id_result_key(monkeypatch):
     assert fake_client.get_calls[0] == f"result:{job['job_id']}"
     assert fake_client.deleted == f"result:{job['job_id']}"
     assert result["text"] == "ok"
+
+
+
+
+def test_debug_endpoints_hidden_by_default(monkeypatch):
+    router = load_router_app(monkeypatch, ENABLE_DEBUG_ENDPOINTS="false")
+
+    with pytest.raises(router.HTTPException) as epp_error:
+        router.debug_epp_request()
+
+    with pytest.raises(router.HTTPException) as routing_error:
+        router.debug_routing_decision()
+
+    assert epp_error.value.status_code == 404
+    assert routing_error.value.status_code == 404
+
+
+def test_debug_epp_request_enabled(monkeypatch):
+    router = load_router_app(monkeypatch, ENABLE_DEBUG_ENDPOINTS="true")
+
+    router.LAST_EPP_REQUEST = {
+        "request_id": "router-epp-pick",
+        "policy": "cost_latency_score",
+        "latency_slo_ms": 800.0,
+        "endpoints": [],
+    }
+
+    response = router.debug_epp_request()
+
+    assert response["status"] == "ok"
+    assert response["latest_epp_request"]["request_id"] == "router-epp-pick"
