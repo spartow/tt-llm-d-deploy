@@ -11,6 +11,21 @@
 
 This repository proves it end-to-end on Kubernetes with reproducible benchmarks.
 
+## What llm-d Handles / What HetroServe Builds
+
+HetroServe is not a replacement for llm-d. It is a heterogeneous accelerator integration and routing layer that aligns with llm-d-style inference scheduling.
+
+| Area | llm-d / Gateway API Inference Extension | HetroServe |
+|---|---|---|
+| Inference routing model | Defines inference-aware scheduling concepts such as endpoint picking and scorer-driven routing | Applies those concepts to heterogeneous accelerator backends across NVIDIA, AMD, Tenstorrent, and future inference ASICs |
+| Endpoint scoring | Provides the upstream-compatible scorer abstraction and scheduling framework | Implements cross-vendor scoring using live backend metrics, queue depth, latency, cost, health, and KV-cache locality |
+| Gateway integration | Handles Kubernetes Gateway API-oriented inference routing patterns | Provides vendor-neutral backend placement logic that can plug into the gateway/inference scheduler path |
+| Backend telemetry | Expects backend and endpoint signals to inform placement | Normalizes backend `/control` metrics into scorer-compatible payloads |
+| Accelerator support | Does not itself make every accelerator a first-class backend | Builds the adapter layer for non-NVIDIA and vendor-specific inference runtimes |
+| Current demo | Upstream scheduler concepts and interfaces | Working Redis queue path, mock heterogeneous backends, live metric scoring, KEDA autoscaling, Prometheus/Grafana observability |
+| Near-term roadmap | Real Gateway API Inference Extension scorer integration | Real scorer interface implementation, KV-cache signal, vLLM CPU backend, and HeterogeneousService CRD |
+
+
 ## Architecture
 
 ```mermaid
