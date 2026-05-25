@@ -26,3 +26,4 @@ artifacts/keda-proof/*.txt
 .DS_Store
 .vscode/
 .idea/
+benchmark/results/
